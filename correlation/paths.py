@@ -99,18 +99,22 @@ def lookup_key(row: dict) -> tuple[str, ...]:
     return tuple(str(row[field]) for field in COEX_LOOKUP_FIELDS)
 
 
-def read_completed_coex_rows(manage_path: str) -> dict[tuple[str, ...], dict]:
+def read_completed_coex_rows(
+    manage_path: str,
+    *,
+    mu_column: str = "mu_coex_FITTED",
+) -> dict[tuple[str, ...], dict]:
     if not os.path.isfile(manage_path):
         return {}
 
     by_key: dict[tuple[str, ...], dict] = {}
     with open(manage_path, newline="") as f:
         for row in csv.DictReader(f):
-            fitted = str(row.get("mu_coex_FITTED", "")).strip()
-            if not fitted or fitted.lower() == "nan":
+            mu_val = str(row.get(mu_column, "")).strip()
+            if not mu_val or mu_val.lower() == "nan":
                 continue
             try:
-                float(fitted)
+                float(mu_val)
             except ValueError:
                 continue
             by_key[lookup_key(row)] = row

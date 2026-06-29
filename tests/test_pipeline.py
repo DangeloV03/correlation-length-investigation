@@ -270,6 +270,29 @@ def test_gpu_accumulation_completes_on_snapshots(tmp_path):
     assert np.isfinite(fit.slope)
 
 
+def test_generate_jobs_exact_mu_source(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from correlation.generate_jobs import main as generate_main
+    import sys
+
+    sys.argv = [
+        "generate_jobs",
+        "--mu-source", "exact",
+        "--eps-min", "-2.0",
+        "--eps-max", "-2.0",
+        "--dmu-min", "1.0",
+        "--dmu-max", "1.0",
+        "--L", "16",
+        "--eq-time", "1",
+        "--prod-time", "2",
+        "--prod-chunks", "2",
+        "--num-parallel-runs", "1",
+    ]
+    generate_main()
+    samples = list((tmp_path / "correlation_samples").glob("*.json"))
+    assert len(samples) == 1
+
+
 def test_analyze_metadata_writes_outputs(tmp_path):
     L = 16
     x, y = np.meshgrid(np.arange(L), np.arange(L), indexing="ij")

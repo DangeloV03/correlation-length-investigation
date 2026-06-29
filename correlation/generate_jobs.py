@@ -1,9 +1,10 @@
 """
-Create square-lattice correlation production jobs from fitted coex rows.
+Create square-lattice correlation production jobs from coexistence chemical potential.
 
-Run the coex phase first (`generate_samples.py`, `run_all.py`, `analyzer.py`).
-This script reads numeric mu_coex_FITTED values from manage.csv, then creates
-one production JSON per requested epsilon and square lattice size.
+Default (--mu-source fitted): numeric mu_coex_FITTED in manage.csv after coex.analyzer.
+Alternatives:
+  flex  — mu_coex_FLEX from manage.csv (coex.generate_samples only; no analyzer)
+  exact — analytical equilibrium mu from flex_coex.coex_chemical_potential (no manage.csv)
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+import numpy as np
 
 from correlation.paths import (
     MANIFEST,
@@ -20,6 +23,7 @@ from correlation.paths import (
     correlation_job_filename,
     read_completed_coex_rows,
 )
+from coex.flex_coex import coex_chemical_potential
 from coex.generate_samples import (
     DELTA_F,
     DMU_MAX,
@@ -28,12 +32,18 @@ from coex.generate_samples import (
     EPS_MAX,
     EPS_MIN,
     EPS_STEP,
+    FLEX_INDEX,
     K,
     MANAGE_CSV,
     SCHEME,
     frange,
 )
 from common.queue_manifest import merge_pending
+
+MU_SOURCE_COLUMNS = {
+    "fitted": "mu_coex_FITTED",
+    "flex": "mu_coex_FLEX",
+}
 
 DEFAULT_RUN_SETTINGS = {
     "beta": 1.0,
@@ -48,6 +58,28 @@ DEFAULT_RUN_SETTINGS = {
 
 def _lookup(row: dict) -> tuple[str, ...]:
     return tuple(str(row[field]) for field in ["epsilon", "delta_f", "delta_mu", "k", "scheme"])
+
+
+def _exact_mu_coex(epsilon: float, delta_mu: float) -> float:
+    mu = coex_chemical_potential(
+        epsilon,
+        DELTA_F,
+        delta_mu,
+        K,
+        scheme=FLEX_INDEX,
+    )
+    return float(np.asarray(mu).ravel()[0])
+
+
+def _exact_mu_coex(epsilon: float, delta_mu: float) -> float:
+    mu = coex_chemical_potential(
+        epsilon,
+        DELTA_F,
+        delta_mu,
+        K,
+        scheme=FLEX_INDEX,
+    )
+    return float(np.asarray(mu).ravel()[0])
 
 
 def main() -> None:
@@ -74,12 +106,28 @@ def main() -> None:
     parser.add_argument("--prod-chunks", type=int, default=None)
     parser.add_argument("--num-parallel-runs", type=int, default=None)
     parser.add_argument("--num-batches", type=int, default=None)
+    parser.add_argument(
+        "--mu-source",
+        choices=["fitted", "flex", "exact"],
+        default="fitted",
+        help="Coexistence mu: fitted (analyzer), flex (generate_samples), or exact (analytic)",
+    )
     args = parser.parse_args()
 
-    coex_rows = read_completed_coex_rows(args.manage)
-    if not coex_rows:
-        print(f"No numeric mu_coex_FITTED rows found in '{args.manage}'. Run the coex phase first.")
-        return
+    if args.mu_source != "exact":
+        mu_column = MU_SOURCE_COLUMNS[args.mu_source]
+        coex_rows = read_completed_coex_rows(args.manage, mu_column=mu_column)
+        if not coex_rows:
+            print(
+                f"No numeric {mu_column} rows found in '{args.manage}'. "
+                f"Run coex.generate_samples (flex) or coex.analyzer (fitted) first, "
+                f"or use --mu-source exact."
+            )
+            return
+    else:
+        coex_rows = {}
+        mu_column = ""
+        print("[generate_jobs] using analytical mu_coex (exact equilibrium; no manage.csv)")
 
     os.makedirs(args.samples_dir, exist_ok=True)
     eps_values = frange(args.eps_min, args.eps_max, args.eps_step)
@@ -93,20 +141,28 @@ def main() -> None:
 
     for epsilon in eps_values:
         for delta_mu in dmu_values:
-            lookup = _lookup({
-                "epsilon": epsilon,
-                "delta_f": DELTA_F,
-                "delta_mu": delta_mu,
-                "k": K,
-                "scheme": SCHEME,
-            })
-            row = coex_rows.get(lookup)
-            if row is None:
-                print(f"[skip] no mu_coex_FITTED for eps={epsilon} dmu={delta_mu}")
+            if args.mu_source == "exact":
+                mu_coex = _exact_mu_coex(epsilon, delta_mu)
+            else:
+                row = coex_rows.get(_lookup({
+                    "epsilon": epsilon,
+                    "delta_f": DELTA_F,
+                    "delta_mu": delta_mu,
+                    "k": K,
+                    "scheme": SCHEME,
+                }))
+                if row is None:
+                    mu_coex = None
+                else:
+                    mu_coex = float(row[mu_column])
+            if mu_coex is None:
+                print(f"[skip] no mu for eps={epsilon} dmu={delta_mu} (source={args.mu_source})")
                 n_skipped += 1
                 continue
-
-            mu_coex_fitted = float(row["mu_coex_FITTED"])
+            if mu_coex > 0 and args.mu_source != "exact":
+                print(f"[skip] mu_coex={mu_coex:.6f} > 0 for eps={epsilon} dmu={delta_mu}")
+                n_skipped += 1
+                continue
             for l_val in l_values:
                 run_settings = dict(DEFAULT_RUN_SETTINGS)
                 if args.eq_time is not None:
@@ -128,8 +184,8 @@ def main() -> None:
                     "scheme": SCHEME,
                     "Lx": l_val,
                     "Ly": l_val,
-                    "mu": mu_coex_fitted,
-                    "mu_coex_FITTED": mu_coex_fitted,
+                    "mu": mu_coex,
+                    "mu_coex_FITTED": mu_coex,
                     "run_settings": run_settings,
                     "results_base": args.results_dir,
                 }
@@ -148,7 +204,7 @@ def main() -> None:
     merge_pending(pending_paths, path=args.manifest)
     print(f"Wrote {n_files} new JSON files to '{args.samples_dir}/' ({n_existing} existed)")
     print(f"Queued {len(pending_paths)} path(s) into '{args.manifest}'")
-    print(f"Skipped {n_skipped} coex lookup(s) without fitted mu")
+    print(f"Skipped {n_skipped} grid point(s) (source={args.mu_source})")
 
 
 if __name__ == "__main__":
