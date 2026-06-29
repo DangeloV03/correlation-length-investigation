@@ -61,12 +61,16 @@ Reads `manage.csv` rows with a fitted `mu_coex_FITTED`, then runs production sim
 - `runner.py` — runs a single production job: equilibrate → chunked production → save `snapshot.npy` per chunk + `snapshot_metadata.csv`
 
 ### Stage 3 — Correlation Analysis (`correlation/analyzer.py`)
-Loads snapshots, converts lattice sites (0=EMPTY, 2=BONDING) to spins (±1), and estimates ξ via two independent methods:
+Loads snapshots, converts lattice sites (0=EMPTY, 2=BONDING) to spins (±1), computes the connected real-space correlation function G(r), and fits ξ.
 
-1. **Fourier-space fit** — averages |FFT|² over snapshots, bins radially, fits `1/Ĝ(k) ~ k²` (Ornstein–Zernike model using `sin²(k₀/2)`)
-2. **Real-space fit** — computes 2D spatial autocorrelation via FFT, radially averages to get G(r), fits `G(r) = A·exp(-r/ξ)` for r ≥ 1
+1. FFT autocorrelation → `C2D = ifft2(|fft2(spins)|²) / N`
+2. Subtract m² → connected correlation `G2D`
+3. Radial average → `G(r)` (averaged over all snapshots)
+4. Fit `G(r) = A·exp(-r/ξ)` for r ≥ 1
 
-Outputs: `fourier_modes.csv`, `G_r.csv`, `correlation_length.csv` per result directory.
+Outputs: `G_r.csv`, `correlation_length.csv` per result directory.
+
+**Planned:** PyTorch GPU parallelization for running multiple replicas concurrently. Currently CPU-only (numpy FFT); validate correctness first, then add GPU path.
 
 ### Queue & Dispatch (`common/queue_manifest.py`)
 All job dispatching uses file-locked JSON manifests (`run_all_queue.json`, `correlation_queue.json`). Schema: `{"pending": [...], "in_flight": {...}}`. Key operations: `merge_pending` (deduplicates), `pop_next_pending` (FIFO), `mark_in_flight`/`remove_in_flight`. The `run_all.py` dispatchers in both `coex/` and `correlation/` are long-running daemons that submit via `simple_slurm` and re-enqueue failures.
