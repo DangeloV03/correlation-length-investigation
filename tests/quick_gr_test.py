@@ -35,11 +35,11 @@ from correlation.analyzer import compute_G_r, fit_xi, _write_csv
 from correlation.paths import ANALYSIS_CSV, METADATA_CSV, METADATA_FIELDS
 
 # ── Physics parameters ────────────────────────────────────────────────────────
-EPSILON   = 1.5     # binding energy
+EPSILON   = -1.5    # binding energy (negative in this system's convention)
 DELTA_F   = 0.0     # free-energy offset (INERT vs BONDING)
 DELTA_MU  = 0.0     # driven asymmetry (0 = equilibrium)
 K         = 1.0     # chemical recombination base rate
-SCHEME    = 1
+SCHEME    = "homo"  # HeteroChain expects a string
 BETA      = 1.0
 
 # ── Simulation size / timing ─────────────────────────────────────────────────
@@ -154,7 +154,7 @@ def plot_G_r(
     ax.set_xlabel("r  (lattice units)")
     ax.set_ylabel("G(r)")
     ax.set_title(
-        rf"Connected G(r) — L={L}, $\epsilon$={EPSILON}, "
+        rf"Connected G(r) — L={L}, $\epsilon$={EPSILON}, scheme={SCHEME}, "
         rf"n_snap={fit['n_snapshots']}"
     )
     ax.legend()
