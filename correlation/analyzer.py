@@ -120,8 +120,18 @@ def fit_xi(
     def exp_decay(r, A, xi):
         return A * np.exp(-r / xi)
 
-    p0 = [float(G_fit[0]), float(L / 4)]
-    popt, pcov = curve_fit(exp_decay, r_fit, G_fit, p0=p0, maxfev=10_000)
+    # Estimate xi from the log-slope of the first two points; much better than L/4.
+    if len(G_fit) >= 2 and G_fit[1] > 0:
+        xi0 = float(-(r_fit[1] - r_fit[0]) / np.log(G_fit[1] / G_fit[0]))
+        xi0 = max(xi0, 0.5)
+    else:
+        xi0 = float(L / 4)
+    p0 = [float(G_fit[0]), xi0]
+    popt, pcov = curve_fit(
+        exp_decay, r_fit, G_fit, p0=p0,
+        bounds=([0.0, 0.0], [np.inf, np.inf]),
+        maxfev=10_000,
+    )
     A_fit, xi_fit = float(popt[0]), float(popt[1])
     A_err, xi_err = float(np.sqrt(pcov[0, 0])), float(np.sqrt(pcov[1, 1]))
 
