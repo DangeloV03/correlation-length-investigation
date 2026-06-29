@@ -1,0 +1,21 @@
+# Static Slurm directives for run_all.py (simple_slurm).
+# Edit partition, account, and resources for your Della setup.
+
+job_name: flex_sim
+cpus_per_task: 4
+mem: 8G
+time: "24:00:00"
+partition: cpu
+# account: your_account   # uncomment if required
+report_dir: ~/slurm_reports
+output: "~/slurm_reports/%j.out"
+error: "~/slurm_reports/%j.err"
+
+# Shell commands prepended to each batch script (module loads, conda activate, etc.)
+setup_cmds:
+  - "module load anaconda3/2024.10"
+  - "source \"$(conda info --base)/etc/profile.d/conda.sh\""
+  - "conda activate lattice"
+  - "export LD_LIBRARY_PATH=\"$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}\""
+  - "export PYTHONUNBUFFERED=1"
+  - "export PYTHONPATH=\"$(pwd):${PYTHONPATH:-}\""

@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments / Conda
+.env
+.venv
+.venv*/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter (not used in this repo)
+*.ipynb
+.ipynb_checkpoints/
+
+# Local tooling caches
+.mplconfig/
+.cache/
+
+# Generated pipeline outputs (large data — keep out of git)
+samples/
+test_samples/
+results/
+correlation_samples/
+correlation_results/
+test_run_out/
+
+# Run tracking and queue state (generated / local)
+manage.csv
+test_manage.csv
+*_manage.csv
+run_all_queue.json
+correlation_queue.json
+
+# Simulation scratch dirs (if any remain outside results/)
+_scratch_*/
+
+# Lattice snapshots from runs
+**/final_lattice_*.npy
+**/snapshots/**/*.npy
