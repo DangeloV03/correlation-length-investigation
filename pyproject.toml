@@ -13,6 +13,7 @@ dependencies = [
     "pandas",
     "pyyaml",
     "simple-slurm",
+    "torch",
 ]
 
 [project.optional-dependencies]
@@ -21,3 +22,9 @@ dev = ["pytest"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["coex*", "correlation*", "common*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: expensive MC or large-L synthesis tests",
+]
+testpaths = ["tests"]

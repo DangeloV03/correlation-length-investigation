@@ -44,6 +44,14 @@ class RealSpaceFitResult:
     warning: str
 
 
+@dataclass
+class RealSpaceGpuFitResult:
+    xi: float
+    slope: float
+    n_pairs_used: int
+    warning: str
+
+
 def lattice_to_spins(lattice: np.ndarray, mapping: str = "active_vs_other") -> np.ndarray:
     if mapping == "active_vs_other":
         return np.where(lattice == BONDING, 1.0, -1.0)
@@ -269,6 +277,237 @@ def fit_real_space_xi(
     )
 
 
+def _require_torch():
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError(
+            "PyTorch is required for the GPU real-space estimator; "
+            "install torch or use the FFT radial fallback"
+        ) from exc
+    return torch
+
+
+def _flat_site_coords(L: int, device) -> "torch.Tensor":
+    torch = _require_torch()
+    flat = torch.arange(L * L, device=device, dtype=torch.float32)
+    y = torch.div(flat, L, rounding_mode="floor")
+    x = flat - y * L
+    return torch.stack([x, y], dim=-1)
+
+
+def _pbc_distance_tile(
+    coords,
+    i0: int,
+    i1: int,
+    L: int,
+) -> "torch.Tensor":
+    torch = _require_torch()
+    rows = coords[i0:i1]
+    diff = rows[:, None, :] - coords[None, :, :]
+    diff = diff - L * torch.round(diff / L)
+    return diff.norm(dim=-1)
+
+
+def _accumulate_connected_correlation(
+    paths: list[str],
+    mapping: str,
+    *,
+    chunk_size: int,
+    compute_device,
+    store_device,
+) -> tuple["torch.Tensor", int, float]:
+    """Tile-wise outer-product accumulation; store the connected G on store_device."""
+    torch = _require_torch()
+    if not paths:
+        raise ValueError("no snapshot paths provided")
+
+    n_snaps = 0
+    m_sum = 0.0
+    n_sites: int | None = None
+    L: int | None = None
+    accum = None
+
+    for path in paths:
+        spins = lattice_to_spins(np.load(path), mapping)
+        if spins.ndim != 2 or spins.shape[0] != spins.shape[1]:
+            raise ValueError(f"snapshot must be square 2D lattice: {path}")
+        L = int(spins.shape[0])
+        n = L * L
+        if n_sites is None:
+            n_sites = n
+            accum = torch.zeros(n, n, dtype=torch.float32, device=store_device)
+        elif n != n_sites:
+            raise ValueError(f"snapshot shape mismatch: {path}")
+
+        sigma = torch.from_numpy(spins.astype(np.float32, copy=False).ravel()).to(compute_device)
+        m_sum += float(sigma.sum().item())
+
+        for i0 in range(0, n, chunk_size):
+            i1 = min(i0 + chunk_size, n)
+            tile = torch.outer(sigma[i0:i1], sigma)
+            accum[i0:i1] += tile.to(store_device)
+
+        n_snaps += 1
+        del sigma
+
+    assert accum is not None and L is not None and n_sites is not None
+    accum /= float(n_snaps)
+    m_bar = m_sum / (n_snaps * n_sites)
+    accum -= m_bar * m_bar
+    return accum, L, m_bar
+
+
+def _sample_pairs_and_fit(
+    G,
+    coords,
+    L: int,
+    *,
+    max_pairs: int,
+    min_pairs: int,
+    seed: int,
+) -> RealSpaceGpuFitResult:
+    torch = _require_torch()
+    n = G.shape[0]
+    rng = np.random.default_rng(seed)
+
+    r_vals: list[float] = []
+    log_g_vals: list[float] = []
+    batch = min(max_pairs * 4, 2_000_000)
+    attempts = 0
+    max_attempts = max(20, max_pairs // max(1, batch // 4))
+
+    while len(r_vals) < max_pairs and attempts < max_attempts:
+        attempts += 1
+        ii = rng.integers(0, n, size=batch)
+        jj = rng.integers(0, n, size=batch)
+        g_vals = G[ii, jj]
+        if g_vals.device.type != "cpu":
+            g_vals = g_vals.cpu()
+        g_np = g_vals.numpy()
+        positive = g_np > 0
+        if not np.any(positive):
+            continue
+
+        ii = ii[positive]
+        jj = jj[positive]
+        g_np = g_np[positive]
+
+        ci = coords[ii]
+        cj = coords[jj]
+        diff = ci - cj
+        diff = diff - L * torch.round(diff / L)
+        dist = diff.norm(dim=-1).cpu().numpy()
+
+        remaining = max_pairs - len(r_vals)
+        take = min(remaining, dist.size)
+        r_vals.extend(dist[:take].tolist())
+        log_g_vals.extend(np.log(g_np[:take]).tolist())
+
+    warning = ""
+    if len(r_vals) < 2:
+        raise ValueError("not enough positive G(r,r') pairs for GPU fit")
+    if len(r_vals) < min_pairs:
+        warning = (
+            f"GPU fit used only {len(r_vals)} positive pairs "
+            f"(recommended >= {min_pairs})"
+        )
+
+    r_arr = np.asarray(r_vals, dtype=float)
+    log_g_arr = np.asarray(log_g_vals, dtype=float)
+    slope, _intercept = np.polyfit(r_arr, log_g_arr, deg=1)
+
+    if slope >= 0:
+        unphysical = "GPU real-space fit slope is non-negative (unphysical decay)"
+        warning = f"{warning}; {unphysical}".strip("; ") if warning else unphysical
+        xi = float("nan")
+    else:
+        xi = float(-1.0 / slope)
+
+    return RealSpaceGpuFitResult(
+        xi=xi,
+        slope=float(slope),
+        n_pairs_used=len(r_vals),
+        warning=warning,
+    )
+
+
+def fit_real_space_xi_gpu(
+    paths: list[str],
+    *,
+    mapping: str = "active_vs_other",
+    chunk_size: int = 512,
+    max_pairs: int = 5_000_000,
+    min_pairs: int = 1000,
+    seed: int = 0,
+) -> RealSpaceGpuFitResult:
+    """
+    Brute-force connected real-space correlation length on GPU without FFT.
+
+    Loads snapshots one at a time, accumulates tiled outer products, subtracts
+    ⟨m⟩², samples positive pair distances, and fits log G vs r.
+    """
+    try:
+        torch = _require_torch()
+    except ImportError:
+        print(
+            "[correlation_analyzer] WARNING: PyTorch not installed; "
+            "using FFT radial real-space path for xi_realspace_gpu",
+            flush=True,
+        )
+        snapshots = load_spin_snapshots(paths, mapping)
+        gr = radial_real_space_correlation(snapshots, subtract_magnetization=True)
+        rs = fit_real_space_xi(gr, L=snapshots[0].shape[0])
+        warning = rs.warning
+        prefix = "PyTorch unavailable; used FFT radial fallback"
+        warning = f"{prefix}; {warning}".strip("; ") if warning else prefix
+        return RealSpaceGpuFitResult(
+            xi=rs.xi,
+            slope=rs.slope,
+            n_pairs_used=rs.n_points,
+            warning=warning,
+        )
+
+    if not torch.cuda.is_available():
+        print(
+            "[correlation_analyzer] WARNING: CUDA unavailable; "
+            "using FFT radial real-space path for xi_realspace_gpu",
+            flush=True,
+        )
+        snapshots = load_spin_snapshots(paths, mapping)
+        gr = radial_real_space_correlation(snapshots, subtract_magnetization=True)
+        rs = fit_real_space_xi(gr, L=snapshots[0].shape[0])
+        warning = rs.warning
+        prefix = "GPU unavailable; used FFT radial fallback"
+        warning = f"{prefix}; {warning}".strip("; ") if warning else prefix
+        return RealSpaceGpuFitResult(
+            xi=rs.xi,
+            slope=rs.slope,
+            n_pairs_used=rs.n_points,
+            warning=warning,
+        )
+
+    compute_device = torch.device("cuda")
+    store_device = torch.device("cpu")
+
+    G, L, _m_bar = _accumulate_connected_correlation(
+        paths,
+        mapping,
+        chunk_size=chunk_size,
+        compute_device=compute_device,
+        store_device=store_device,
+    )
+    coords = _flat_site_coords(L, compute_device)
+    return _sample_pairs_and_fit(
+        G,
+        coords,
+        L,
+        max_pairs=max_pairs,
+        min_pairs=min_pairs,
+        seed=seed,
+    )
+
+
 def write_csv(path: str, rows: list[dict], fieldnames: list[str]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", newline="") as f:
@@ -284,7 +523,9 @@ def analyze_metadata(
     mapping: str = "active_vs_other",
     max_modes: int | None = None,
     output_dir: str | None = None,
-) -> tuple[FitResult, RealSpaceFitResult]:
+    gpu_chunk_size: int = 512,
+    gpu_max_pairs: int = 5_000_000,
+) -> tuple[FitResult, RealSpaceFitResult, RealSpaceGpuFitResult]:
     paths = snapshot_paths(metadata_path)
     snapshots = load_spin_snapshots(paths, mapping)
     Lx, Ly = snapshots[0].shape
@@ -297,6 +538,12 @@ def analyze_metadata(
     fit = fit_correlation_length(modes, L=Lx)
     gr = radial_real_space_correlation(snapshots, subtract_magnetization=True)
     rs_fit = fit_real_space_xi(gr, L=Lx)
+    rs_gpu = fit_real_space_xi_gpu(
+        paths,
+        mapping=mapping,
+        chunk_size=gpu_chunk_size,
+        max_pairs=gpu_max_pairs,
+    )
 
     write_csv(
         os.path.join(outdir, "fourier_modes.csv"),
@@ -318,6 +565,7 @@ def analyze_metadata(
             "m2_mean": m2_mean,
             "xi": fit.xi,
             "xi_realspace": rs_fit.xi,
+            "xi_realspace_gpu": rs_gpu.xi,
             "chi": fit.chi,
             "fit_intercept": fit.intercept,
             "fit_slope": fit.slope,
@@ -327,8 +575,11 @@ def analyze_metadata(
             "realspace_fit_points": rs_fit.n_points,
             "realspace_r_min": rs_fit.r_min,
             "realspace_r_max": rs_fit.r_max,
+            "realspace_gpu_slope": rs_gpu.slope,
+            "realspace_gpu_n_pairs": rs_gpu.n_pairs_used,
             "warning": fit.warning,
             "realspace_warning": rs_fit.warning,
+            "realspace_gpu_warning": rs_gpu.warning,
         }],
         [
             "n_snapshots",
@@ -338,6 +589,7 @@ def analyze_metadata(
             "m2_mean",
             "xi",
             "xi_realspace",
+            "xi_realspace_gpu",
             "chi",
             "fit_intercept",
             "fit_slope",
@@ -347,11 +599,14 @@ def analyze_metadata(
             "realspace_fit_points",
             "realspace_r_min",
             "realspace_r_max",
+            "realspace_gpu_slope",
+            "realspace_gpu_n_pairs",
             "warning",
             "realspace_warning",
+            "realspace_gpu_warning",
         ],
     )
-    return fit, rs_fit
+    return fit, rs_fit, rs_gpu
 
 
 def main() -> None:
@@ -367,6 +622,8 @@ def main() -> None:
     )
     parser.add_argument("--max-modes", type=int, default=None)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--gpu-chunk-size", type=int, default=512)
+    parser.add_argument("--gpu-max-pairs", type=int, default=5_000_000)
     args = parser.parse_args()
 
     metadata_path = args.path
@@ -375,20 +632,25 @@ def main() -> None:
     if not Path(metadata_path).is_file():
         raise FileNotFoundError(metadata_path)
 
-    fit, rs_fit = analyze_metadata(
+    fit, rs_fit, rs_gpu = analyze_metadata(
         metadata_path,
         mapping=args.mapping,
         max_modes=args.max_modes,
         output_dir=args.output_dir,
+        gpu_chunk_size=args.gpu_chunk_size,
+        gpu_max_pairs=args.gpu_max_pairs,
     )
     print(
         f"[correlation_analyzer] xi_fourier={fit.xi:.6g} xi_realspace={rs_fit.xi:.6g} "
-        f"chi={fit.chi:.6g} fit_points={fit.n_points} rs_points={rs_fit.n_points}"
+        f"xi_realspace_gpu={rs_gpu.xi:.6g} chi={fit.chi:.6g} "
+        f"fit_points={fit.n_points} rs_points={rs_fit.n_points} gpu_pairs={rs_gpu.n_pairs_used}"
     )
     if fit.warning:
         print(f"[correlation_analyzer] Fourier WARNING: {fit.warning}")
     if rs_fit.warning:
         print(f"[correlation_analyzer] Real-space WARNING: {rs_fit.warning}")
+    if rs_gpu.warning:
+        print(f"[correlation_analyzer] GPU real-space WARNING: {rs_gpu.warning}")
 
 
 if __name__ == "__main__":

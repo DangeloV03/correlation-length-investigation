@@ -4,3 +4,4 @@ pandas
 pyyaml
 simple-slurm
 pytest
+torch
