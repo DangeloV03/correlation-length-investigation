@@ -21,8 +21,6 @@ sbatch <<EOF
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=00:30:00
-#SBATCH --gres=gpu:1
-#SBATCH --partition=gpu
 #SBATCH --output=${OUTPUT_DIR}/quick_gr_%j.out
 #SBATCH --error=${OUTPUT_DIR}/quick_gr_%j.err
 
