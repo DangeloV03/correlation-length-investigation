@@ -417,7 +417,7 @@ def _sample_pairs_and_fit(
     log_g_arr = np.asarray(log_g_vals, dtype=float)
     slope, _intercept = np.polyfit(r_arr, log_g_arr, deg=1)
 
-    if slope >= 0:
+    if slope >= -1e-10:
         unphysical = "GPU real-space fit slope is non-negative (unphysical decay)"
         warning = f"{warning}; {unphysical}".strip("; ") if warning else unphysical
         xi = float("nan")

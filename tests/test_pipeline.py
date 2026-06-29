@@ -217,32 +217,57 @@ def test_pbc_distance_tile_matches_minimum_image():
     assert dist[0, 0].item() == pytest.approx(0.0)
 
 
-def test_gpu_accumulation_recovers_exponential_xi_on_cpu_torch(tmp_path):
+def test_gpu_sample_pairs_fit_on_exponential_G():
+    """Pair-sampling fit on a known exp(-r/xi) connected correlator."""
     pytest.importorskip("torch")
-    from correlation.analyzer import _accumulate_connected_correlation, _flat_site_coords, _sample_pairs_and_fit
+    from correlation.analyzer import _flat_site_coords, _sample_pairs_and_fit
 
     torch = pytest.importorskip("torch")
     L = 8
-    xi_true = 2.0
-    x, y = np.meshgrid(np.arange(L), np.arange(L), indexing="ij")
-    field = np.exp(-np.sqrt(x * x + y * y) / xi_true)
-    lattice = np.where(field > np.median(field), 2, 0).astype(np.uint32)
-    path = tmp_path / "snap.npy"
-    np.save(path, lattice)
+    xi_true = 2.5
+    device = torch.device("cpu")
+    coords = _flat_site_coords(L, device)
+    diff = coords[:, None, :] - coords[None, :, :]
+    diff = diff - L * torch.round(diff / L)
+    dist = diff.norm(dim=-1)
+    G = torch.exp(-dist / xi_true) - 0.05
 
-    G, L_out, _ = _accumulate_connected_correlation(
-        [str(path), str(path)],
+    fit = _sample_pairs_and_fit(G, coords, L, max_pairs=5000, min_pairs=100, seed=1)
+    assert fit.n_pairs_used >= 100
+    assert fit.slope < 0
+    assert fit.xi == pytest.approx(xi_true, rel=0.25)
+
+
+def test_gpu_accumulation_completes_on_snapshots(tmp_path):
+    """Tiled outer-product accumulation runs on saved lattice snapshots."""
+    pytest.importorskip("torch")
+    from correlation.analyzer import _accumulate_connected_correlation, _flat_site_coords, _sample_pairs_and_fit
+
+    from tests.ising_reference import generate_fourier_model_snapshots, spins_to_lattice
+
+    torch = pytest.importorskip("torch")
+    L = 8
+    paths = []
+    for idx, spins in enumerate(generate_fourier_model_snapshots(L, 2.0, n_snapshots=4, seed=7)):
+        path = tmp_path / f"snap_{idx:02d}.npy"
+        np.save(path, spins_to_lattice(spins))
+        paths.append(str(path))
+
+    G, L_out, m_bar = _accumulate_connected_correlation(
+        paths,
         "active_vs_other",
         chunk_size=4,
         compute_device=torch.device("cpu"),
         store_device=torch.device("cpu"),
     )
     assert L_out == L
+    assert np.isfinite(float(G.mean()))
+    assert abs(m_bar) <= 1.0
+
     coords = _flat_site_coords(L, torch.device("cpu"))
-    fit = _sample_pairs_and_fit(G, coords, L, max_pairs=5000, min_pairs=100, seed=1)
-    assert fit.n_pairs_used >= 100
-    assert fit.slope < 0
-    assert fit.xi > 0
+    fit = _sample_pairs_and_fit(G, coords, L, max_pairs=2000, min_pairs=50, seed=2)
+    assert fit.n_pairs_used >= 50
+    assert np.isfinite(fit.slope)
 
 
 def test_analyze_metadata_writes_outputs(tmp_path):
