@@ -109,7 +109,7 @@ def fit_xi(
 
     Returns a dict with xi, xi_err, A, A_err, n_points, r_min, r_max, warning.
     """
-    mask = (r_centers >= 1) & (G_r > 0) & (r_centers < L / 2)
+    mask = (r_centers >= 2) & (G_r > 0) & (r_centers < L / 2)
     r_fit = r_centers[mask]
     G_fit = G_r[mask]
 
