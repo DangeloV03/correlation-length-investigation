@@ -1,9 +1,9 @@
 #!/bin/bash
-# Submit L=256 epsilon sweep: eps in [-1.700, -1.800] step 0.005
+# Submit L=256 epsilon sweep: eps in [-1.700, -1.800] step -0.005
 # 21 eps values x 16 replicas = 336 Slurm array tasks (IDs 0-335)
 #
 # Layout: eps_idx = task_id // 16, replica_id = task_id % 16
-# eps values: -1.700, -1.705, ..., -1.800
+# eps values: -1.700, -1.705, ..., -1.800  (stepping more negative)
 #
 # Usage:
 #   bash scripts/submit_eps_sweep.sh [output_base_dir]
@@ -41,7 +41,7 @@ export PYTHONPATH="${REPO_ROOT}:\${PYTHONPATH:-}"
 
 EPS_IDX=\$((SLURM_ARRAY_TASK_ID / 16))
 REPLICA_ID=\$((SLURM_ARRAY_TASK_ID % 16))
-EPS=\$(python3 -c "print(f'{-1.700 + \${EPS_IDX} * 0.005:.3f}')")
+EPS=\$(python3 -c "print(f'{-1.700 - \${EPS_IDX} * 0.005:.3f}')")
 
 echo "[eps_sweep] node: \$(hostname)"
 echo "[eps_sweep] array_id=\${SLURM_ARRAY_TASK_ID}  eps_idx=\${EPS_IDX}  eps=\${EPS}  replica=\${REPLICA_ID}"
